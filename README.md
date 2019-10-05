@@ -1,14 +1,15 @@
 # 浮世絵作者予測
 
-A short description of the project
+<https://prob.space/competitions/ukiyoe-author>
 
 ## data
 
 ```bash
 mkdir data
-kaggle competitions download -c xxxxxxxxxxxxxxxxxxxxxx -p data
-unzip data/train.csv.zip -d data/
-unzip data/test_images.zip -d data/test_images/
-unzip data/train_images.zip -d data/train_images/
+pushd data
+wget https://probspace-stg.s3.amazonaws.com/problems/39/data/37/ukiyoe-train-labels.npz
+wget https://probspace-stg.s3.amazonaws.com/problems/39/data/38/ukiyoe-test-imgs.npz
+wget https://probspace-stg.s3.amazonaws.com/problems/39/data/39/ukiyoe-train-imgs.npz
+popd
 ```
 

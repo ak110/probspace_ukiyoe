@@ -3,14 +3,18 @@ import functools
 import pathlib
 
 import albumentations as A
+import numpy as np
+import pandas as pd
+import tensorflow as tf
 
+import _data
 import pytoolkit as tk
 
 num_classes = 10
-train_shape = (320, 320, 3)
-predict_shape = (480, 480, 3)
+train_shape = (224, 224, 3)
+predict_shape = (224, 224, 3)
 batch_size = 16
-data_dir = pathlib.Path(f"data")
+nfold = 5
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
 logger = tk.log.get(__name__)
@@ -18,68 +22,81 @@ logger = tk.log.get(__name__)
 
 @app.command(logfile=False)
 def check():
+    _ = _data.load_data()  # 動作確認用に呼ぶだけ呼んでおく
     create_pipeline().check()
 
 
-@app.command()
-@tk.dl.wrap_session(use_horovod=True)
+@app.command(then="predict")
 def train():
-    train_set, val_set = load_data()
-    model = create_pipeline()
-    evals = model.train(train_set, val_set)
+    tk.hvd.init()
+    train_set = _data.load_train_data()
+    folds = tk.validation.split(train_set, nfold, stratify=True)
+    evals = create_pipeline().load(models_dir).cv(train_set, folds, models_dir)
     tk.notifications.post_evals(evals)
 
 
 @app.command()
-@tk.dl.wrap_session(use_horovod=True)
-def validate(model=None):
-    _, val_set = load_data()
+def predict():
+    tk.hvd.init()
+    test_set = _data.load_test_data()
     model = create_pipeline().load(models_dir)
-    pred = model.predict(val_set)[0]
+    pred_list = model.predict(test_set)
+    pred = np.mean(pred_list, axis=0)
     if tk.hvd.is_master():
-        tk.evaluations.print_classification_metrics(val_set.labels, pred)
-
-
-def load_data():
-    return tk.datasets.load_trainval_folders(data_dir, swap=True)
+        df = pd.DataFrame()
+        df["id"] = range(1, len(test_set) + 1)
+        df["y"] = pred.argmax(axis=-1)
+        df.to_csv(models_dir / "submission.csv", index=False)
 
 
 def create_pipeline():
     return tk.pipeline.KerasModel(
         create_model_fn=create_model,
-        train_data_loader=MyDataLoader(data_augmentation=True),
-        val_data_loader=MyDataLoader(),
-        fit_params={"epochs": 300, "callbacks": [tk.callbacks.CosineAnnealing()]},
+        train_data_loader=MyDataLoader(mode="train"),
+        val_data_loader=MyDataLoader(mode="test"),
+        fit_params={"epochs": 1800, "callbacks": [tk.callbacks.CosineAnnealing()]},
         models_dir=models_dir,
-        model_name_format="model.h5",
+        on_batch_fn=_tta,
         use_horovod=True,
     )
 
 
+def _tta(model, X_batch):
+    return np.mean(
+        [
+            model.predict_on_batch(X_batch),
+            model.predict_on_batch(X_batch[:, :, ::-1, :]),
+        ],
+        axis=0,
+    )
+
+
 def create_model():
+    K = tf.keras.backend
+
     conv2d = functools.partial(
-        tk.keras.layers.Conv2D,
+        tf.keras.layers.Conv2D,
         kernel_size=3,
         padding="same",
         use_bias=False,
         kernel_initializer="he_uniform",
-        kernel_regularizer=tk.keras.regularizers.l2(1e-4),
+        kernel_regularizer=tf.keras.regularizers.l2(1e-4),
     )
     bn = functools.partial(
-        tk.keras.layers.BatchNormalization,
-        gamma_regularizer=tk.keras.regularizers.l2(1e-4),
+        tf.keras.layers.BatchNormalization,
+        gamma_regularizer=tf.keras.regularizers.l2(1e-4),
     )
-    act = functools.partial(tk.keras.layers.Activation, "relu")
+    act = functools.partial(tf.keras.layers.Activation, "relu")
 
     def down(filters):
         def layers(x):
-            in_filters = tk.K.int_shape(x)[-1]
+            in_filters = K.int_shape(x)[-1]
             g = conv2d(in_filters // 8)(x)
             g = bn()(g)
             g = act()(g)
             g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
-            x = tk.keras.layers.multiply([x, g])
-            x = tk.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
+            x = tf.keras.layers.multiply([x, g])
+            x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
             x = tk.layers.BlurPooling2D(taps=4)(x)
             x = conv2d(filters)(x)
             x = bn()(x)
@@ -97,15 +114,15 @@ def create_model():
                 x = conv2d(filters)(x)
                 # resblockのadd前だけgammaの初期値を0にする。 <https://arxiv.org/abs/1812.01187>
                 x = bn(gamma_initializer="zeros")(x)
-                x = tk.keras.layers.add([sc, x])
+                x = tf.keras.layers.add([sc, x])
             x = bn()(x)
             x = act()(x)
             return x
 
         return layers
 
-    inputs = x = tk.keras.layers.Input((None, None, 3))
-    x = tk.keras.layers.concatenate(
+    inputs = x = tf.keras.layers.Input((None, None, 3))
+    x = tf.keras.layers.concatenate(
         [
             conv2d(16, kernel_size=2, strides=2)(x),
             conv2d(16, kernel_size=4, strides=2)(x),
@@ -115,7 +132,7 @@ def create_model():
     )  # 1/2
     x = bn()(x)
     x = act()(x)
-    x = tk.keras.layers.concatenate(
+    x = tf.keras.layers.concatenate(
         [
             conv2d(64, kernel_size=2, strides=2)(x),
             conv2d(64, kernel_size=4, strides=2)(x),
@@ -130,16 +147,17 @@ def create_model():
     x = down(512)(x)  # 1/32
     x = blocks(512, 4)(x)
     x = tk.layers.GeM2D()(x)
-    logits = tk.keras.layers.Dense(
-        num_classes, kernel_regularizer=tk.keras.regularizers.l2(1e-4)
+    x = tf.keras.layers.Dense(
+        num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits"
     )(x)
-    x = tk.keras.layers.Activation(activation="softmax")(logits)
-    model = tk.keras.models.Model(inputs=inputs, outputs=x)
+    x = tf.keras.layers.Activation(activation="softmax")(x)
+    model = tf.keras.models.Model(inputs=inputs, outputs=x)
     base_lr = 1e-3 * batch_size * tk.hvd.size()
-    optimizer = tk.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
+    optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
 
     def loss(y_true, y_pred):
         del y_pred
+        logits = model.get_layer("logits").output
         return tk.losses.categorical_crossentropy(
             y_true, logits, from_logits=True, label_smoothing=0.2
         )
@@ -151,18 +169,16 @@ def create_model():
 class MyDataLoader(tk.data.DataLoader):
     """DataLoader"""
 
-    def __init__(self, data_augmentation=False):
+    def __init__(self, mode):
         super().__init__(
             batch_size=batch_size,
-            data_per_sample=2 if data_augmentation else 1,
+            data_per_sample=2 if mode == "train" else 1,
             parallel=True,
         )
-        self.data_augmentation = data_augmentation
-        if self.data_augmentation:
+        self.mode = mode
+        if self.mode == "train":
             self.aug1 = A.Compose(
                 [
-                    tk.image.WrappedTranslateX(p=0.5),
-                    tk.image.WrappedTranslateY(p=0.5),
                     tk.image.RandomTransform(
                         width=train_shape[1],
                         height=train_shape[0],
@@ -172,19 +188,23 @@ class MyDataLoader(tk.data.DataLoader):
                 ]
             )
             self.aug2 = tk.image.RandomErasing()
+        elif self.mode == "refine":
+            self.aug1 = tk.image.RandomTransform.create_refine(
+                width=train_shape[1], height=train_shape[0]
+            )
+            self.aug2 = None
         else:
             self.aug1 = tk.image.Resize(width=predict_shape[1], height=predict_shape[0])
             self.aug2 = None
 
     def get_data(self, dataset: tk.data.Dataset, index: int):
         X, y = dataset.get_data(index)
-        X = tk.ndimage.load(X)
         X = self.aug1(image=X)["image"]
-        y = tk.keras.utils.to_categorical(y, num_classes)
+        y = tf.keras.utils.to_categorical(y, num_classes)
         return X, y
 
     def get_sample(self, data: list) -> tuple:
-        if self.data_augmentation:
+        if self.mode == "train":
             sample1, sample2 = data
             X, y = tk.ndimage.mixup(sample1, sample2, mode="beta")
             X = self.aug2(image=X)["image"]
