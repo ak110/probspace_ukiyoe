@@ -4,7 +4,6 @@ import pathlib
 
 import albumentations as A
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 
 import _data
@@ -26,33 +25,65 @@ def check():
     create_pipeline().check()
 
 
-@app.command(then="predict")
+@app.command(then="validate", use_horovod=True)
 def train():
-    tk.hvd.init()
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True)
     evals = create_pipeline().load(models_dir).cv(train_set, folds, models_dir)
     tk.notifications.post_evals(evals)
 
 
-@app.command()
+@app.command(then="predict", use_horovod=True)
+def validate():
+    train_set = _data.load_train_data()
+    folds = tk.validation.split(train_set, nfold, stratify=True)
+    model = create_pipeline().load(models_dir)
+    pred = model.predict_oof(train_set, folds)
+    _data.save_oofp(models_dir, train_set, pred)
+
+
+@app.command(use_horovod=True)
 def predict():
-    tk.hvd.init()
     test_set = _data.load_test_data()
     model = create_pipeline().load(models_dir)
     pred_list = model.predict(test_set)
     pred = np.mean(pred_list, axis=0)
-    if tk.hvd.is_master():
-        df = pd.DataFrame()
-        df["id"] = range(1, len(test_set) + 1)
-        df["y"] = pred.argmax(axis=-1)
-        df.to_csv(models_dir / "submission.csv", index=False)
+    _data.save_prediction(models_dir, test_set, pred)
+
+
+@app.command(then="validate", use_horovod=True)
+def refine2():
+    train_set = _data.load_train_data()
+    folds = tk.validation.split(train_set, nfold, stratify=True)
+    pipeline = create_pipeline().load(models_dir)
+    for fold, (model, (train_indices, val_indices)) in enumerate(
+        zip(pipeline.models, folds)
+    ):
+        if fold != 4:
+            continue
+        for layer in model.layers:
+            if isinstance(layer, tf.keras.layers.BatchNormalization):
+                layer.trainable = False
+        compile_model(model, lr=1e-5)
+        tk.models.fit(
+            model,
+            train_set=train_set.slice(train_indices),
+            train_data_loader=pipeline.refine_data_loader,
+            val_set=train_set.slice(val_indices),
+            val_data_loader=pipeline.val_data_loader,
+            epochs=50,
+        )
+        model_path = pipeline.models_dir / pipeline.model_name_format.format(
+            fold=fold + 1
+        )
+        tk.models.save(model, model_path)
 
 
 def create_pipeline():
     return tk.pipeline.KerasModel(
         create_model_fn=create_model,
         train_data_loader=MyDataLoader(mode="train"),
+        refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
         fit_params={"epochs": 1800, "callbacks": [tk.callbacks.CosineAnnealing()]},
         models_dir=models_dir,
@@ -152,7 +183,12 @@ def create_model():
     )(x)
     x = tf.keras.layers.Activation(activation="softmax")(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
-    base_lr = 1e-3 * batch_size * tk.hvd.size()
+    compile_model(model)
+    return model
+
+
+def compile_model(model, lr=1e-3):
+    base_lr = lr * batch_size * tk.hvd.size()
     optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
 
     def loss(y_true, y_pred):
@@ -163,7 +199,6 @@ def create_model():
         )
 
     tk.models.compile(model, optimizer, loss, ["acc"])
-    return model
 
 
 class MyDataLoader(tk.data.DataLoader):
@@ -200,7 +235,7 @@ class MyDataLoader(tk.data.DataLoader):
     def get_data(self, dataset: tk.data.Dataset, index: int):
         X, y = dataset.get_data(index)
         X = self.aug1(image=X)["image"]
-        y = tf.keras.utils.to_categorical(y, num_classes)
+        y = tf.keras.utils.to_categorical(y, num_classes) if y is not None else None
         return X, y
 
     def get_sample(self, data: list) -> tuple:
