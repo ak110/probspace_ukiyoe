@@ -29,7 +29,7 @@ def check():
 def train():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True)
-    model = create_model()
+    model = create_model().load("models/model_baseline")
     evals = model.cv(train_set, folds, models_dir)
     tk.notifications.post_evals(evals)
 
@@ -58,7 +58,7 @@ def create_model():
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
-        fit_params={"epochs": 1800, "callbacks": [tk.callbacks.CosineAnnealing()]},
+        fit_params={"epochs": 300, "callbacks": [tk.callbacks.CosineAnnealing()]},
         models_dir=models_dir,
         on_batch_fn=_tta,
         use_horovod=True,
@@ -66,13 +66,15 @@ def create_model():
 
 
 def _tta(model, X_batch):
-    return np.mean(
-        [
-            model.predict_on_batch(X_batch),
-            model.predict_on_batch(X_batch[:, :, ::-1, :]),
-        ],
-        axis=0,
+    pred_list = tk.models.predict_on_batch_augmented(
+        model,
+        X_batch,
+        flip=(False, True),
+        crop_size=(3, 3),
+        padding_size=(32, 32),
+        padding_mode="edge",
     )
+    return np.mean(pred_list, axis=0)
 
 
 def create_model():
@@ -150,7 +152,7 @@ def create_model():
     x = blocks(512, 4)(x)
     x = down(512)(x)  # 1/32
     x = blocks(512, 4)(x)
-    x = tk.layers.GeM2D()(x)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(
         num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits"
     )(x)
@@ -160,7 +162,7 @@ def create_model():
     return model
 
 
-def compile_model(model, lr=1e-3):
+def compile_model(model, lr=1e-4):
     base_lr = lr * batch_size * tk.hvd.size()
     optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
 
@@ -208,7 +210,10 @@ class MyDataLoader(tk.data.DataLoader):
     def get_data(self, dataset: tk.data.Dataset, index: int):
         X, y = dataset.get_data(index)
         X = self.aug1(image=X)["image"]
-        y = tf.keras.utils.to_categorical(y, num_classes) if y is not None else None
+        if y is None:
+            y = None
+        elif y.ndim == 0:
+            y = tf.keras.utils.to_categorical(y, num_classes)
         return X, y
 
     def get_sample(self, data: list) -> tuple:
