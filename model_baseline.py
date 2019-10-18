@@ -54,7 +54,7 @@ def predict():
 
 def create_model():
     return tk.pipeline.KerasModel(
-        create_model_fn=create_model,
+        create_model_fn=create_network,
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
@@ -75,7 +75,7 @@ def _tta(model, X_batch):
     )
 
 
-def create_model():
+def create_network():
     K = tf.keras.backend
 
     conv2d = functools.partial(

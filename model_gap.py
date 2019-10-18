@@ -14,6 +14,7 @@ train_shape = (224, 224, 3)
 predict_shape = (224, 224, 3)
 batch_size = 16
 nfold = 5
+split_seed = 2
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
 logger = tk.log.get(__name__)
@@ -28,8 +29,8 @@ def check():
 @app.command(then="validate", use_horovod=True)
 def train():
     train_set = _data.load_train_data()
-    folds = tk.validation.split(train_set, nfold, stratify=True)
-    model = create_model().load("models/model_baseline")
+    folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
+    model = create_model()
     evals = model.cv(train_set, folds, models_dir)
     tk.notifications.post_evals(evals)
 
@@ -37,7 +38,7 @@ def train():
 @app.command(then="predict", use_horovod=True)
 def validate():
     train_set = _data.load_train_data()
-    folds = tk.validation.split(train_set, nfold, stratify=True)
+    folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
     model = create_model().load(models_dir)
     pred = model.predict_oof(train_set, folds)
     _data.save_oofp(models_dir, train_set, pred)
@@ -54,11 +55,11 @@ def predict():
 
 def create_model():
     return tk.pipeline.KerasModel(
-        create_model_fn=create_model,
+        create_model_fn=create_network,
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
-        fit_params={"epochs": 300, "callbacks": [tk.callbacks.CosineAnnealing()]},
+        fit_params={"epochs": 1800, "callbacks": [tk.callbacks.CosineAnnealing()]},
         models_dir=models_dir,
         on_batch_fn=_tta,
         use_horovod=True,
@@ -77,7 +78,7 @@ def _tta(model, X_batch):
     return np.mean(pred_list, axis=0)
 
 
-def create_model():
+def create_network():
     K = tf.keras.backend
 
     conv2d = functools.partial(
@@ -162,7 +163,7 @@ def create_model():
     return model
 
 
-def compile_model(model, lr=1e-4):
+def compile_model(model, lr=1e-3):
     base_lr = lr * batch_size * tk.hvd.size()
     optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
 
@@ -210,10 +211,7 @@ class MyDataLoader(tk.data.DataLoader):
     def get_data(self, dataset: tk.data.Dataset, index: int):
         X, y = dataset.get_data(index)
         X = self.aug1(image=X)["image"]
-        if y is None:
-            y = None
-        elif y.ndim == 0:
-            y = tf.keras.utils.to_categorical(y, num_classes)
+        y = tf.keras.utils.to_categorical(y, num_classes) if y is not None else None
         return X, y
 
     def get_sample(self, data: list) -> tuple:
