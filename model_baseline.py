@@ -171,16 +171,6 @@ class MyModel(tk.pipeline.KerasModel):
         return loss, metrics
 
 
-def _tta(model, X_batch):
-    return np.mean(
-        [
-            model.predict_on_batch(X_batch),
-            model.predict_on_batch(X_batch[:, :, ::-1, :]),
-        ],
-        axis=0,
-    )
-
-
 class MyDataLoader(tk.data.DataLoader):
     """DataLoader"""
 
@@ -227,6 +217,16 @@ class MyDataLoader(tk.data.DataLoader):
             X, y = super().get_sample(data)
         X = tk.ndimage.preprocess_tf(X)
         return X, y
+
+
+def _tta(model, X_batch):
+    return np.mean(
+        [
+            model.predict_on_batch(X_batch),
+            model.predict_on_batch(X_batch[:, :, ::-1, :]),
+        ],
+        axis=0,
+    )
 
 
 if __name__ == "__main__":

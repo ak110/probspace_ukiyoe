@@ -5,6 +5,7 @@ import pathlib
 import albumentations as A
 import numpy as np
 import tensorflow as tf
+import tensorflow_addons as tfa
 
 import _data
 import pytoolkit as tk
@@ -58,7 +59,8 @@ def create_model():
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
-        fit_params={"epochs": 1800, "callbacks": [tk.callbacks.CosineAnnealing()]},
+        epochs=300,
+        callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
         use_horovod=True,
@@ -77,11 +79,11 @@ class MyModel(tk.pipeline.KerasModel):
             padding="same",
             use_bias=False,
             kernel_initializer="he_uniform",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+            # kernel_regularizer=tf.keras.regularizers.l2(1e-4),
         )
         bn = functools.partial(
             tf.keras.layers.BatchNormalization,
-            gamma_regularizer=tf.keras.regularizers.l2(1e-4),
+            # gamma_regularizer=tf.keras.regularizers.l2(1e-4),
         )
         act = functools.partial(tf.keras.layers.Activation, "relu")
 
@@ -143,10 +145,10 @@ class MyModel(tk.pipeline.KerasModel):
         x = blocks(512, 4)(x)
         x = down(512)(x)  # 1/32
         x = blocks(512, 4)(x)
-        x = tf.keras.layers.GlobalAveragePooling2D()(x)
+        x = tk.layers.GeM2D()(x)
         x = tf.keras.layers.Dense(
             num_classes,
-            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+            # kernel_regularizer=tf.keras.regularizers.l2(1e-4),
             name="logits",
         )(x)
         x = tf.keras.layers.Activation(activation="softmax")(x)
@@ -156,7 +158,9 @@ class MyModel(tk.pipeline.KerasModel):
     def create_optimizer(self, mode: str) -> tk.models.OptimizerType:
         base_lr = 1e-3 if mode != "refine" else 1e-5
         lr = base_lr * batch_size * tk.hvd.size()
-        optimizer = tf.keras.optimizers.SGD(lr=lr, momentum=0.9, nesterov=True)
+        optimizer = tfa.optimizers.SGDW(
+            lr=lr, weight_decay=1e-4, momentum=0.9, nesterov=True
+        )
         return optimizer
 
     def create_loss(self, model: tf.keras.models.Model) -> tuple:
@@ -189,7 +193,7 @@ class MyDataLoader(tk.data.DataLoader):
                         height=train_shape[0],
                         base_scale=predict_shape[0] / train_shape[0],
                     ),
-                    tk.image.RandomColorAugmentors(noisy=True),
+                    tk.image.RandomColorAugmentors(noisy=False),
                 ]
             )
             self.aug2 = tk.image.RandomErasing()
