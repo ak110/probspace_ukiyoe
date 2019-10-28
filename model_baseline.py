@@ -58,7 +58,8 @@ def create_model():
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
-        fit_params={"epochs": 1800, "callbacks": [tk.callbacks.CosineAnnealing()]},
+        epochs=1800,
+        callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
         use_horovod=True,
@@ -155,8 +156,10 @@ class MyModel(tk.pipeline.KerasModel):
 
     def create_optimizer(self, mode: str) -> tk.models.OptimizerType:
         base_lr = 1e-3 if mode != "refine" else 1e-5
-        lr = base_lr * batch_size * tk.hvd.size()
-        optimizer = tf.keras.optimizers.SGD(lr=lr, momentum=0.9, nesterov=True)
+        learning_rate = base_lr * batch_size * tk.hvd.size()
+        optimizer = tf.keras.optimizers.SGD(
+            learning_rate=learning_rate, momentum=0.9, nesterov=True
+        )
         return optimizer
 
     def create_loss(self, model: tf.keras.models.Model) -> tuple:
@@ -220,13 +223,15 @@ class MyDataLoader(tk.data.DataLoader):
 
 
 def _tta(model, X_batch):
-    return np.mean(
-        [
-            model.predict_on_batch(X_batch),
-            model.predict_on_batch(X_batch[:, :, ::-1, :]),
-        ],
-        axis=0,
+    pred_list = tk.models.predict_on_batch_augmented(
+        model,
+        X_batch,
+        flip=(False, True),
+        crop_size=(5, 5),
+        padding_size=(16, 16),
+        padding_mode="edge",
     )
+    return np.mean(pred_list, axis=0)
 
 
 if __name__ == "__main__":
