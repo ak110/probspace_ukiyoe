@@ -54,7 +54,9 @@ def predict():
 
 
 def create_model():
-    return MyModel(
+    return tk.pipeline.KerasModel(
+        create_network_fn=create_network,
+        nfold=nfold,
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
@@ -66,112 +68,103 @@ def create_model():
     )
 
 
-class MyModel(tk.pipeline.KerasModel):
-    """KerasModel"""
+def create_network() -> tf.keras.models.Model:
+    K = tf.keras.backend
 
-    def create_network(self) -> tf.keras.models.Model:
-        K = tf.keras.backend
+    conv2d = functools.partial(
+        tf.keras.layers.Conv2D,
+        kernel_size=3,
+        padding="same",
+        use_bias=False,
+        kernel_initializer="he_uniform",
+        kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+    )
+    bn = functools.partial(
+        tf.keras.layers.BatchNormalization,
+        gamma_regularizer=tf.keras.regularizers.l2(1e-4),
+    )
+    act = functools.partial(tf.keras.layers.Activation, "relu")
 
-        conv2d = functools.partial(
-            tf.keras.layers.Conv2D,
-            kernel_size=3,
-            padding="same",
-            use_bias=False,
-            kernel_initializer="he_uniform",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
-        )
-        bn = functools.partial(
-            tf.keras.layers.BatchNormalization,
-            gamma_regularizer=tf.keras.regularizers.l2(1e-4),
-        )
-        act = functools.partial(tf.keras.layers.Activation, "relu")
+    def down(filters):
+        def layers(x):
+            in_filters = K.int_shape(x)[-1]
+            g = conv2d(in_filters // 8)(x)
+            g = bn()(g)
+            g = act()(g)
+            g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
+            x = tf.keras.layers.multiply([x, g])
+            x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
+            x = tk.layers.BlurPooling2D(taps=4)(x)
+            x = conv2d(filters)(x)
+            x = bn()(x)
+            return x
 
-        def down(filters):
-            def layers(x):
-                in_filters = K.int_shape(x)[-1]
-                g = conv2d(in_filters // 8)(x)
-                g = bn()(g)
-                g = act()(g)
-                g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
-                x = tf.keras.layers.multiply([x, g])
-                x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
-                x = tk.layers.BlurPooling2D(taps=4)(x)
+        return layers
+
+    def blocks(filters, count):
+        def layers(x):
+            for _ in range(count):
+                sc = x
                 x = conv2d(filters)(x)
                 x = bn()(x)
-                return x
-
-            return layers
-
-        def blocks(filters, count):
-            def layers(x):
-                for _ in range(count):
-                    sc = x
-                    x = conv2d(filters)(x)
-                    x = bn()(x)
-                    x = act()(x)
-                    x = conv2d(filters)(x)
-                    # resblockのadd前だけgammaの初期値を0にする。 <https://arxiv.org/abs/1812.01187>
-                    x = bn(gamma_initializer="zeros")(x)
-                    x = tf.keras.layers.add([sc, x])
-                x = bn()(x)
                 x = act()(x)
-                return x
+                x = conv2d(filters)(x)
+                # resblockのadd前だけgammaの初期値を0にする。 <https://arxiv.org/abs/1812.01187>
+                x = bn(gamma_initializer="zeros")(x)
+                x = tf.keras.layers.add([sc, x])
+            x = bn()(x)
+            x = act()(x)
+            return x
 
-            return layers
+        return layers
 
-        inputs = x = tf.keras.layers.Input((None, None, 3))
-        x = tf.keras.layers.concatenate(
-            [
-                conv2d(16, kernel_size=2, strides=2)(x),
-                conv2d(16, kernel_size=4, strides=2)(x),
-                conv2d(16, kernel_size=6, strides=2)(x),
-                conv2d(16, kernel_size=8, strides=2)(x),
-            ]
-        )  # 1/2
-        x = bn()(x)
-        x = act()(x)
-        x = tf.keras.layers.concatenate(
-            [
-                conv2d(64, kernel_size=2, strides=2)(x),
-                conv2d(64, kernel_size=4, strides=2)(x),
-            ]
-        )  # 1/4
-        x = bn()(x)
-        x = blocks(128, 2)(x)
-        x = down(256)(x)  # 1/8
-        x = blocks(256, 4)(x)
-        x = down(512)(x)  # 1/16
-        x = blocks(512, 4)(x)
-        x = down(512)(x)  # 1/32
-        x = blocks(512, 4)(x)
-        x = tk.layers.GeM2D()(x)
-        x = tf.keras.layers.Dense(
-            num_classes,
-            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
-            name="logits",
-        )(x)
-        x = tf.keras.layers.Activation(activation="softmax")(x)
-        model = tf.keras.models.Model(inputs=inputs, outputs=x)
-        return model
+    inputs = x = tf.keras.layers.Input((None, None, 3))
+    x = tf.keras.layers.concatenate(
+        [
+            conv2d(16, kernel_size=2, strides=2)(x),
+            conv2d(16, kernel_size=4, strides=2)(x),
+            conv2d(16, kernel_size=6, strides=2)(x),
+            conv2d(16, kernel_size=8, strides=2)(x),
+        ]
+    )  # 1/2
+    x = bn()(x)
+    x = act()(x)
+    x = tf.keras.layers.concatenate(
+        [
+            conv2d(64, kernel_size=2, strides=2)(x),
+            conv2d(64, kernel_size=4, strides=2)(x),
+        ]
+    )  # 1/4
+    x = bn()(x)
+    x = blocks(128, 2)(x)
+    x = down(256)(x)  # 1/8
+    x = blocks(256, 4)(x)
+    x = down(512)(x)  # 1/16
+    x = blocks(512, 4)(x)
+    x = down(512)(x)  # 1/32
+    x = blocks(512, 4)(x)
+    x = tk.layers.GeM2D()(x)
+    x = tf.keras.layers.Dense(
+        num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits",
+    )(x)
+    x = tf.keras.layers.Activation("softmax")(x)
+    model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    def create_optimizer(self, mode: str) -> tk.models.OptimizerType:
-        base_lr = 1e-3 if mode != "refine" else 1e-5
-        learning_rate = base_lr * batch_size * tk.hvd.size()
-        optimizer = tf.keras.optimizers.SGD(
-            learning_rate=learning_rate, momentum=0.9, nesterov=True
+    base_lr = 1e-3
+    learning_rate = base_lr * batch_size * tk.hvd.size()
+    optimizer = tf.keras.optimizers.SGD(
+        learning_rate=learning_rate, momentum=0.9, nesterov=True
+    )
+
+    def loss(y_true, y_pred):
+        del y_pred
+        logits = model.get_layer("logits").output
+        return tk.losses.categorical_crossentropy(
+            y_true, logits, from_logits=True, label_smoothing=0.2
         )
-        return optimizer
 
-    def create_loss(self, model: tf.keras.models.Model) -> tuple:
-        def loss(y_true, y_pred):
-            del y_pred
-            logits = model.get_layer("logits").output
-            return tk.losses.categorical_crossentropy(
-                y_true, logits, from_logits=True, label_smoothing=0.2
-            )
-
-        metrics = ["acc"]
-        return loss, metrics
+    tk.models.compile(model, optimizer, loss, ["acc"])
+    return model
 
 
 class MyDataLoader(tk.data.DataLoader):
