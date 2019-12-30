@@ -14,7 +14,7 @@ train_shape = (224, 224, 3)
 predict_shape = (224, 224, 3)
 batch_size = 16
 nfold = 5
-split_seed = 4
+split_seed = 3
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
 logger = tk.log.get(__name__)
