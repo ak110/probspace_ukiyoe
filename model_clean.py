@@ -14,7 +14,7 @@ train_shape = (224, 224, 3)
 predict_shape = (224, 224, 3)
 batch_size = 16
 nfold = 5
-split_seed = 3
+split_seed = 5
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
 logger = tk.log.get(__name__)
@@ -26,7 +26,7 @@ def check():
     create_model().check()
 
 
-@app.command(then="validate", use_horovod=True)
+@app.command(then="validate", distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def train():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
@@ -35,7 +35,7 @@ def train():
     tk.notifications.post_evals(evals)
 
 
-@app.command(then="predict", use_horovod=True)
+@app.command(then="predict", distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def validate():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
@@ -44,7 +44,7 @@ def validate():
     _data.save_oofp(models_dir, train_set, pred)
 
 
-@app.command(use_horovod=True)
+@app.command(distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def predict():
     test_set = _data.load_test_data()
     model = create_model().load(models_dir)
@@ -61,10 +61,11 @@ def create_model():
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
         epochs=1800,
+        refine_epochs=10,  # DataAugmentation控えめなので(?)
         callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
-        use_horovod=True,
+        num_replicas_in_sync=app.num_replicas_in_sync,
     )
 
 
@@ -85,24 +86,19 @@ def create_network() -> tf.keras.models.Model:
     )
     act = functools.partial(tf.keras.layers.Activation, "relu")
 
-    def down(filters):
+    def blocks(filters, count, down=True):
         def layers(x):
-            in_filters = K.int_shape(x)[-1]
-            g = conv2d(in_filters // 8)(x)
-            g = bn()(g)
-            g = act()(g)
-            g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
-            x = tf.keras.layers.multiply([x, g])
-            x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
-            x = tk.layers.BlurPooling2D(taps=4)(x)
-            x = conv2d(filters)(x)
-            x = bn()(x)
-            return x
-
-        return layers
-
-    def blocks(filters, count):
-        def layers(x):
+            if down:
+                in_filters = K.int_shape(x)[-1]
+                g = conv2d(in_filters // 8)(x)
+                g = bn()(g)
+                g = act()(g)
+                g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
+                x = tf.keras.layers.multiply([x, g])
+                x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
+                x = tk.layers.BlurPooling2D(taps=4)(x)
+                x = conv2d(filters)(x)
+                x = bn()(x)
             for _ in range(count):
                 sc = x
                 x = conv2d(filters)(x)
@@ -121,44 +117,40 @@ def create_network() -> tf.keras.models.Model:
     inputs = x = tf.keras.layers.Input((None, None, 3))
     x = tf.keras.layers.concatenate(
         [
-            conv2d(16, kernel_size=2, strides=2)(x),
-            conv2d(16, kernel_size=4, strides=2)(x),
-            conv2d(16, kernel_size=6, strides=2)(x),
-            conv2d(16, kernel_size=8, strides=2)(x),
+            conv2d(16, kernel_size=2)(x),
+            conv2d(16, kernel_size=4)(x),
+            conv2d(16, kernel_size=6)(x),
+            conv2d(16, kernel_size=8)(x),
         ]
-    )  # 1/2
+    )  # 1/1
     x = bn()(x)
-    x = blocks(64, 4)(x)
-    x = down(128)(x)  # 1/4
-    x = blocks(128, 4)(x)
-    x = down(256)(x)  # 1/8
-    x = blocks(256, 4)(x)
-    x = down(512)(x)  # 1/16
-    x = blocks(512, 4)(x)
-    x = down(512)(x)  # 1/32
-    x = blocks(512, 4)(x)
+    x = blocks(64, 2, down=False)(x)
+    x = blocks(64, 3)(x)  # 1/2
+    x = blocks(128, 3)(x)  # 1/4
+    x = blocks(256, 3)(x)  # 1/8
+    x = blocks(512, 3)(x)  # 1/16
+    x = blocks(512, 3)(x)  # 1/32
     x = tk.layers.GeM2D()(x)
     x = tf.keras.layers.Dense(
         num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits",
     )(x)
-    x = tf.keras.layers.Activation("softmax")(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    base_lr = 1e-3
-    learning_rate = base_lr * batch_size * tk.hvd.size()
+    x = tf.keras.layers.Activation("softmax")(x)
+    prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
+
+    learning_rate = 1e-3 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
     optimizer = tf.keras.optimizers.SGD(
         learning_rate=learning_rate, momentum=0.9, nesterov=True
     )
 
-    def loss(y_true, y_pred):
-        del y_pred
-        logits = model.get_layer("logits").output
+    def loss(y_true, logits):
         return tk.losses.categorical_crossentropy(
             y_true, logits, from_logits=True, label_smoothing=0.2
         )
 
     tk.models.compile(model, optimizer, loss, ["acc"])
-    return model
+    return model, prediction_model
 
 
 class MyDataLoader(tk.data.DataLoader):
@@ -177,7 +169,7 @@ class MyDataLoader(tk.data.DataLoader):
                         height=train_shape[0],
                         base_scale=predict_shape[0] / train_shape[0],
                     ),
-                    tk.image.RandomColorAugmentors(noisy=True),
+                    tk.image.RandomColorAugmentors(noisy=False),
                 ]
             )
             self.aug2 = tk.image.RandomErasing()

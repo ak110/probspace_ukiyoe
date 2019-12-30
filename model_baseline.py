@@ -48,7 +48,7 @@ def validate():
 def predict():
     test_set = _data.load_test_data()
     model = create_model().load(models_dir)
-    pred_list = model.predict(test_set)
+    pred_list = model.predict_all(test_set)
     pred = np.mean(pred_list, axis=0)
     _data.save_prediction(models_dir, test_set, pred)
 
@@ -172,9 +172,7 @@ class MyDataLoader(tk.data.DataLoader):
 
     def __init__(self, mode):
         super().__init__(
-            batch_size=batch_size,
-            data_per_sample=2 if mode == "train" else 1,
-            parallel=True,
+            batch_size=batch_size, data_per_sample=2 if mode == "train" else 1,
         )
         self.mode = mode
         if self.mode == "train":
