@@ -136,9 +136,6 @@ def create_network() -> tf.keras.models.Model:
     )(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    x = tf.keras.layers.Activation("softmax")(x)
-    prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
-
     learning_rate = 1e-3 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
     optimizer = tf.keras.optimizers.SGD(
         learning_rate=learning_rate, momentum=0.9, nesterov=True
@@ -150,6 +147,9 @@ def create_network() -> tf.keras.models.Model:
         )
 
     tk.models.compile(model, optimizer, loss, ["acc"])
+
+    x = tf.keras.layers.Activation("softmax")(x)
+    prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
     return model, prediction_model
 
 

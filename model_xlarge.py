@@ -14,10 +14,20 @@ train_shape = (224, 224, 3)
 predict_shape = (224, 224, 3)
 batch_size = 16
 nfold = 5
-split_seed = 3
+split_seed = 4
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
 logger = tk.log.get(__name__)
+
+
+@app.command(distribute_strategy_fn=tf.distribute.MirroredStrategy)
+def evaluate():
+    train_set = _data.load_train_data()
+    folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
+    model = create_model().load(models_dir)
+    model.on_batch_fn = None
+    pred = model.predict_oof(train_set, folds)
+    _data.save_oofp(models_dir, train_set, pred)
 
 
 @app.command(logfile=False)
@@ -35,7 +45,9 @@ def train():
     tk.notifications.post_evals(evals)
 
 
-@app.command(then="predict", distribute_strategy_fn=tf.distribute.MirroredStrategy)
+@app.command(
+    distribute_strategy_fn=tf.distribute.MirroredStrategy
+)  # TODO: then="predict",
 def validate():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
@@ -134,9 +146,6 @@ def create_network() -> tf.keras.models.Model:
     )(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    x = tf.keras.layers.Activation("softmax")(x)
-    prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
-
     learning_rate = 1e-3 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
     optimizer = tf.keras.optimizers.SGD(
         learning_rate=learning_rate, momentum=0.9, nesterov=True
@@ -148,6 +157,9 @@ def create_network() -> tf.keras.models.Model:
         )
 
     tk.models.compile(model, optimizer, loss, ["acc"])
+
+    x = tf.keras.layers.Activation("softmax")(x)
+    prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
     return model, prediction_model
 
 
