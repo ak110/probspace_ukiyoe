@@ -14,7 +14,7 @@ train_shape = (224, 224, 3)
 predict_shape = (224, 224, 3)
 batch_size = 16
 nfold = 5
-split_seed = 5
+split_seed = 3
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
 logger = tk.log.get(__name__)
@@ -31,6 +31,7 @@ def train():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
     model = create_model()
+    model.load("models/model_large")
     evals = model.cv(train_set, folds)
     tk.notifications.post_evals(evals)
 
@@ -60,8 +61,8 @@ def create_model():
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
-        epochs=1800,
-        refine_epochs=10,  # DataAugmentation控えめなので(?)
+        epochs=100,
+        refine_epochs=0,
         callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
@@ -86,19 +87,24 @@ def create_network() -> tf.keras.models.Model:
     )
     act = functools.partial(tf.keras.layers.Activation, "relu")
 
-    def blocks(filters, count, down=True):
+    def down(filters):
         def layers(x):
-            if down:
-                in_filters = K.int_shape(x)[-1]
-                g = conv2d(in_filters // 8)(x)
-                g = bn()(g)
-                g = act()(g)
-                g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
-                x = tf.keras.layers.multiply([x, g])
-                x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
-                x = tk.layers.BlurPooling2D(taps=4)(x)
-                x = conv2d(filters)(x)
-                x = bn()(x)
+            in_filters = K.int_shape(x)[-1]
+            g = conv2d(in_filters // 8)(x)
+            g = bn()(g)
+            g = act()(g)
+            g = conv2d(in_filters, use_bias=True, activation="sigmoid")(g)
+            x = tf.keras.layers.multiply([x, g])
+            x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
+            x = tk.layers.BlurPooling2D(taps=4)(x)
+            x = conv2d(filters)(x)
+            x = bn()(x)
+            return x
+
+        return layers
+
+    def blocks(filters, count):
+        def layers(x):
             for _ in range(count):
                 sc = x
                 x = conv2d(filters)(x)
@@ -117,26 +123,29 @@ def create_network() -> tf.keras.models.Model:
     inputs = x = tf.keras.layers.Input((None, None, 3))
     x = tf.keras.layers.concatenate(
         [
-            conv2d(16, kernel_size=2)(x),
-            conv2d(16, kernel_size=4)(x),
-            conv2d(16, kernel_size=6)(x),
-            conv2d(16, kernel_size=8)(x),
+            conv2d(16, kernel_size=2, strides=2)(x),
+            conv2d(16, kernel_size=4, strides=2)(x),
+            conv2d(16, kernel_size=6, strides=2)(x),
+            conv2d(16, kernel_size=8, strides=2)(x),
         ]
-    )  # 1/1
+    )  # 1/2
     x = bn()(x)
-    x = blocks(64, 2, down=False)(x)
-    x = blocks(64, 3)(x)  # 1/2
-    x = blocks(128, 3)(x)  # 1/4
-    x = blocks(256, 3)(x)  # 1/8
-    x = blocks(512, 3)(x)  # 1/16
-    x = blocks(512, 3)(x)  # 1/32
+    x = blocks(64, 4)(x)
+    x = down(128)(x)  # 1/4
+    x = blocks(128, 4)(x)
+    x = down(256)(x)  # 1/8
+    x = blocks(256, 4)(x)
+    x = down(512)(x)  # 1/16
+    x = blocks(512, 4)(x)
+    x = down(512)(x)  # 1/32
+    x = blocks(512, 4)(x)
     x = tk.layers.GeM2D()(x)
     x = tf.keras.layers.Dense(
         num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits",
     )(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    learning_rate = 1e-3 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
+    learning_rate = 1e-4 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
     optimizer = tf.keras.optimizers.SGD(
         learning_rate=learning_rate, momentum=0.9, nesterov=True
     )

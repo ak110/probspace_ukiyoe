@@ -41,13 +41,11 @@ def train():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
     model = create_model()
-    evals = model.cv(train_set, folds, models_dir)
+    evals = model.cv(train_set, folds)
     tk.notifications.post_evals(evals)
 
 
-@app.command(
-    distribute_strategy_fn=tf.distribute.MirroredStrategy
-)  # TODO: then="predict",
+@app.command(then="predict", distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def validate():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)

@@ -31,6 +31,7 @@ def train():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
     model = create_model()
+    model.load("models/model_clean")
     evals = model.cv(train_set, folds)
     tk.notifications.post_evals(evals)
 
@@ -60,8 +61,8 @@ def create_model():
         train_data_loader=MyDataLoader(mode="train"),
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
-        epochs=1800,
-        refine_epochs=10,  # DataAugmentation控えめなので(?)
+        epochs=100,
+        refine_epochs=0,
         callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
@@ -130,13 +131,13 @@ def create_network() -> tf.keras.models.Model:
     x = blocks(256, 3)(x)  # 1/8
     x = blocks(512, 3)(x)  # 1/16
     x = blocks(512, 3)(x)  # 1/32
-    x = tk.layers.GeM2D()(x)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(
         num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits",
     )(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    learning_rate = 1e-3 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
+    learning_rate = 1e-4 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
     optimizer = tf.keras.optimizers.SGD(
         learning_rate=learning_rate, momentum=0.9, nesterov=True
     )
@@ -191,7 +192,7 @@ class MyDataLoader(tk.data.DataLoader):
     def get_sample(self, data: list) -> tuple:
         if self.mode == "train":
             sample1, sample2 = data
-            X, y = tk.ndimage.mixup(sample1, sample2, mode="beta")
+            X, y = tk.ndimage.cut_mix(sample1, sample2)
             X = self.aug2(image=X)["image"]
         else:
             X, y = super().get_sample(data)

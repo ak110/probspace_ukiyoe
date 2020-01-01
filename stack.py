@@ -9,10 +9,12 @@ import pytoolkit as tk
 
 num_classes = 10
 model_names = [
-    "model_baseline",
-    "model_gap",
+    # "model_baseline",
+    # "model_gap",
     "model_clean",
-    "model_large",
+    "model_clean2",
+    "model_cutmix",
+    # "model_large",
 ]
 nfold = 5
 split_seed = 99
@@ -29,7 +31,7 @@ def train():
     )
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
     model = create_model()
-    model.cv(train_set, folds, models_dir)
+    model.cv(train_set, folds)
     # tk.notifications.post_evals(evals)
 
 
@@ -62,6 +64,7 @@ def create_model():
         return tk.pipeline.SKLearnModel(
             sklearn.linear_model.LogisticRegression(n_jobs=-1),
             nfold=nfold,
+            models_dir=models_dir,
             predict_method="predict_proba",
         )
     else:
@@ -76,6 +79,7 @@ def create_model():
                 # "bagging_freq": 0,
             },
             nfold=nfold,
+            models_dir=models_dir,
             seeds=[1],
         )
 

@@ -26,16 +26,16 @@ def check():
     create_model().check()
 
 
-@app.command(then="validate", use_horovod=True)
+@app.command(then="validate", distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def train():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
     model = create_model()
-    evals = model.cv(train_set, folds, models_dir)
+    evals = model.cv(train_set, folds)
     tk.notifications.post_evals(evals)
 
 
-@app.command(then="predict", use_horovod=True)
+@app.command(then="predict", distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def validate():
     train_set = _data.load_train_data()
     folds = tk.validation.split(train_set, nfold, stratify=True, split_seed=split_seed)
@@ -44,7 +44,7 @@ def validate():
     _data.save_oofp(models_dir, train_set, pred)
 
 
-@app.command(use_horovod=True)
+@app.command(distribute_strategy_fn=tf.distribute.MirroredStrategy)
 def predict():
     test_set = _data.load_test_data()
     model = create_model().load(models_dir)
@@ -64,7 +64,7 @@ def create_model():
         callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
-        use_horovod=True,
+        num_replicas_in_sync=app.num_replicas_in_sync,
     )
 
 
@@ -141,24 +141,23 @@ def create_network() -> tf.keras.models.Model:
     x = tf.keras.layers.Dense(
         num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits",
     )(x)
-    x = tf.keras.layers.Activation("softmax")(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
 
-    base_lr = 1e-3
-    learning_rate = base_lr * batch_size * tk.hvd.size()
+    learning_rate = 1e-3 * batch_size * tk.hvd.size() * app.num_replicas_in_sync
     optimizer = tf.keras.optimizers.SGD(
         learning_rate=learning_rate, momentum=0.9, nesterov=True
     )
 
-    def loss(y_true, y_pred):
-        del y_pred
-        logits = model.get_layer("logits").output
+    def loss(y_true, logits):
         return tk.losses.categorical_crossentropy(
             y_true, logits, from_logits=True, label_smoothing=0.2
         )
 
     tk.models.compile(model, optimizer, loss, ["acc"])
-    return model
+
+    x = tf.keras.layers.Activation("softmax")(x)
+    prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
+    return model, prediction_model
 
 
 class MyDataLoader(tk.data.DataLoader):
