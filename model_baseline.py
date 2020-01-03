@@ -61,6 +61,7 @@ def create_model():
         refine_data_loader=MyDataLoader(mode="refine"),
         val_data_loader=MyDataLoader(mode="test"),
         epochs=1800,
+        refine_epochs=50,
         callbacks=[tk.callbacks.CosineAnnealing()],
         models_dir=models_dir,
         on_batch_fn=_tta,
@@ -163,6 +164,7 @@ def create_network() -> tf.keras.models.Model:
 
     x = tf.keras.layers.Activation("softmax")(x)
     prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
+    tk.models.compile(prediction_model, "sgd", "mse")  # tf.distribute用
     return model, prediction_model
 
 

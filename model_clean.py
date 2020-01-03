@@ -150,6 +150,7 @@ def create_network() -> tf.keras.models.Model:
 
     x = tf.keras.layers.Activation("softmax")(x)
     prediction_model = tf.keras.models.Model(inputs=inputs, outputs=x)
+    tk.models.compile(prediction_model, "sgd", "mse")  # tf.distribute用
     return model, prediction_model
 
 

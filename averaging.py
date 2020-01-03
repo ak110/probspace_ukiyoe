@@ -6,15 +6,7 @@ import numpy as np
 import _data
 import pytoolkit as tk
 
-source_models = {
-    # "model_baseline": 1,
-    # "model_gap": 1,
-    "model_clean": 1,
-    "model_cutmix": 0.5,
-    "model_large2": 1,
-    # "model_large": 1,
-    # "model_xlarge": 1,
-}
+source_models = {"model_baseline": 1, "model_clean": 1}
 model_names, model_weights = zip(*source_models.items())
 models_dir = pathlib.Path(f"models/{pathlib.Path(__file__).stem}")
 app = tk.cli.App(output_dir=models_dir)
