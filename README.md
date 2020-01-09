@@ -2,7 +2,7 @@
 
 <https://prob.space/competitions/ukiyoe-author>
 
-## data
+## データの配置
 
 ```bash
 mkdir data
@@ -13,20 +13,17 @@ wget https://probspace-stg.s3.amazonaws.com/problems/39/data/39/ukiyoe-train-img
 popd
 ```
 
-## 学習手順
+## 学習
 
 ```bash
 ./model_baseline.py
 ./model_mixup.py
 ```
 
-## 推論手順
+## 推論
 
 ```bash
-./model_baseline.py predict
-./model_mixup.py predict
-./averaging.py
+docker run --gpus=all --rm --interactive --tty --volume=$PWD:/usr/src/app keras-docker:0.1.0 ./predict.sh
 ```
 
-`models/averaging/submission.csv` が最終結果。2GPUで20分くらい。
-
+`models/averaging/submission.csv` が最終結果。
